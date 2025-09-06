@@ -9,14 +9,12 @@ import (
 	"github.com/zeusln/ios-nwc-server/internal/config"
 	"github.com/zeusln/ios-nwc-server/internal/handler"
 	"github.com/zeusln/ios-nwc-server/internal/middleware"
-	"github.com/zeusln/ios-nwc-server/pkg/utils"
-	"go.uber.org/zap"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
 type Server struct {
 	router *gin.Engine
 	server *http.Server
-	logger *utils.Logger
 }
 
 func NewServer(cfg *config.Config) *Server {
@@ -25,12 +23,11 @@ func NewServer(cfg *config.Config) *Server {
 
 	return &Server{
 		router: router,
-		logger: utils.GetLogger(),
 	}
 }
 
-func (s *Server) SetupRoutes(securityConfig *middleware.SecurityConfig, handlerManager *handler.HandlerManager, logger *zap.Logger) {
-	SetupRoutes(s.router, securityConfig, handlerManager, logger)
+func (s *Server) SetupRoutes(securityConfig *middleware.SecurityConfig, handlerManager *handler.HandlerManager) {
+	SetupRoutes(s.router, securityConfig, handlerManager)
 }
 
 func (s *Server) Start(addr string) error {
@@ -41,14 +38,13 @@ func (s *Server) Start(addr string) error {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-
-	s.logger.Info("Starting server", zap.String("address", addr))
+	logger.WithField("address", addr).Info("Starting server")
 	return s.server.ListenAndServe()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.server != nil {
-		s.logger.Info("Shutting down server")
+		logger.Info("Shutting down server")
 		return s.server.Shutdown(ctx)
 	}
 	return nil

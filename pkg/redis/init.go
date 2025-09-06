@@ -7,13 +7,11 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/zeusln/ios-nwc-server/internal/config"
-	"github.com/zeusln/ios-nwc-server/pkg/utils"
-	"go.uber.org/zap"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
 var (
 	client *redis.Client
-	logger *utils.Logger
 )
 
 type RedisConfig struct {
@@ -25,7 +23,6 @@ type RedisConfig struct {
 }
 
 func Init(cfg *config.Config) error {
-	logger = utils.GetLogger()
 
 	redisConfig := &RedisConfig{
 		Host:     cfg.Redis.Host,
@@ -52,16 +49,16 @@ func Init(cfg *config.Config) error {
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {
-		logger.Error("Failed to connect to Redis", zap.Error(err))
+		logger.WithError(err).Error("Failed to connect to Redis")
 		return fmt.Errorf("redis connection failed: %w", err)
 	}
 
-	logger.Success("Redis connected successfully",
-		zap.String("host", redisConfig.Host),
-		zap.Int("port", redisConfig.Port),
-		zap.Int("db", redisConfig.DB),
-		zap.Int("pool_size", redisConfig.PoolSize),
-	)
+	logger.WithFields(map[string]interface{}{
+		"host":      redisConfig.Host,
+		"port":      redisConfig.Port,
+		"db":        redisConfig.DB,
+		"pool_size": redisConfig.PoolSize,
+	}).Info("Redis connected successfully")
 
 	return nil
 }

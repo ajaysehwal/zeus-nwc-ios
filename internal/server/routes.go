@@ -4,10 +4,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zeusln/ios-nwc-server/internal/handler"
 	"github.com/zeusln/ios-nwc-server/internal/middleware"
-	"go.uber.org/zap"
 )
 
-func SetupRoutes(router *gin.Engine, securityConfig *middleware.SecurityConfig, handlerManager *handler.HandlerManager, logger *zap.Logger) {
+func SetupRoutes(router *gin.Engine, securityConfig *middleware.SecurityConfig, handlerManager *handler.HandlerManager) {
 	rateLimiter := middleware.NewRateLimiter(securityConfig)
 
 	router.Use(middleware.SecurityHeaders())
@@ -29,7 +28,7 @@ func SetupRoutes(router *gin.Engine, securityConfig *middleware.SecurityConfig, 
 	api := router.Group("/api/v1")
 	{
 		handoffService := handlerManager.GetHandoffService()
-		handoffHandler := handler.NewHandoffHandler(handoffService, logger)
+		handoffHandler := handler.NewHandoffHandler(handoffService)
 
 		handoff := api.Group("/handoff")
 		{

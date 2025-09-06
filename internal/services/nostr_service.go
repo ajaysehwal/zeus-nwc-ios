@@ -4,20 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/redis/go-redis/v9"
 	"github.com/zeusln/ios-nwc-server/internal/config"
-	"github.com/zeusln/ios-nwc-server/pkg/utils"
-	"go.uber.org/zap"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
 type NostrService struct {
 	config      *config.Config
 	redis       *redis.Client
-	logger      *utils.Logger
 	connections map[string]*UserConnection
 	mu          sync.RWMutex
 }
@@ -43,20 +42,19 @@ type HandoffRequest struct {
 	Connections   []Connection `json:"connections"`
 }
 
-func NewNostrService(cfg *config.Config, redisClient *redis.Client, logger *utils.Logger) *NostrService {
+func NewNostrService(cfg *config.Config, redisClient *redis.Client) *NostrService {
 	return &NostrService{
 		config:      cfg,
 		redis:       redisClient,
-		logger:      logger,
 		connections: make(map[string]*UserConnection),
 	}
 }
 
 func (s *NostrService) HandleHandoff(ctx context.Context, req *HandoffRequest) error {
-	s.logger.Info("Processing handoff request",
-		zap.String("service_pubkey", req.ServicePubkey),
-		zap.Int("connections_count", len(req.Connections)),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey":    req.ServicePubkey,
+		"connections_count": len(req.Connections),
+	}).Info("Processing handoff request")
 
 	if err := s.validateRequest(req); err != nil {
 		return fmt.Errorf("invalid request: %w", err)
@@ -79,13 +77,15 @@ func (s *NostrService) HandleHandoff(ctx context.Context, req *HandoffRequest) e
 		return fmt.Errorf("failed to store connection: %w", err)
 	}
 
-	go s.connectToRelays(ctx, conn)
-	go s.startConnectionHealthCheck(ctx, conn)
+	// Use background context for long-running operations
+	bgCtx := context.Background()
+	go s.connectToRelays(bgCtx, conn)
+	go s.startConnectionHealthCheck(bgCtx, conn)
 
-	s.logger.Info("Handoff processed successfully",
-		zap.String("service_pubkey", req.ServicePubkey),
-		zap.Int("connections_count", len(req.Connections)),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey":    req.ServicePubkey,
+		"connections_count": len(req.Connections),
+	}).Info("Handoff request processed successfully")
 
 	return nil
 }
@@ -129,20 +129,21 @@ func (s *NostrService) storeConnection(ctx context.Context, conn *UserConnection
 }
 
 func (s *NostrService) connectToRelays(ctx context.Context, conn *UserConnection) {
-	s.logger.Info("Connecting to relays",
-		zap.String("service_pubkey", conn.ServicePubkey),
-		zap.Int("connections_count", len(conn.Connections)),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey":    conn.ServicePubkey,
+		"connections_count": len(conn.Connections),
+	}).Info("🔌 Starting to connect to relays")
 
 	relayPubkeys := make(map[string][]string)
 	for _, connection := range conn.Connections {
 		relayPubkeys[connection.RelayURL] = append(relayPubkeys[connection.RelayURL], connection.PubKey)
 	}
 
-	s.logger.Info("Unique relays identified",
-		zap.String("service_pubkey", conn.ServicePubkey),
-		zap.Int("unique_relays", len(relayPubkeys)),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey": conn.ServicePubkey,
+		"unique_relays":  len(relayPubkeys),
+	}).Info("Unique relays identified")
+
 	for relayURL, pubkeys := range relayPubkeys {
 		go s.connectToRelayAndSubscribe(ctx, conn, relayURL, pubkeys)
 	}
@@ -151,6 +152,11 @@ func (s *NostrService) connectToRelays(ctx context.Context, conn *UserConnection
 func (s *NostrService) connectToRelayAndSubscribe(ctx context.Context, conn *UserConnection, relayURL string, pubkeys []string) {
 	const maxRetries = 3
 	const baseDelay = 2 * time.Second
+	logger.WithFields(map[string]interface{}{
+		"relay_url":      relayURL,
+		"service_pubkey": conn.ServicePubkey,
+		"pubkeys":        pubkeys,
+	}).Info("🔗 Attempting to connect to relay")
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		relay, err := nostr.RelayConnect(ctx, relayURL)
@@ -159,66 +165,80 @@ func (s *NostrService) connectToRelayAndSubscribe(ctx context.Context, conn *Use
 			conn.Relays[relayURL] = relay
 			conn.mu.Unlock()
 
-			s.logger.RelayConnection(relayURL, "connected",
-				zap.String("service_pubkey", conn.ServicePubkey),
-				zap.Strings("pubkeys", pubkeys),
-				zap.Int("attempt", attempt),
-			)
+			logger.WithFields(map[string]interface{}{
+				"relay_url":      relayURL,
+				"service_pubkey": conn.ServicePubkey,
+				"pubkeys":        pubkeys,
+				"attempt":        attempt,
+			}).Info("✅ Relay connection successful - now subscribing to events")
 
 			s.subscribeToEventsForRelay(ctx, conn, relay, relayURL, pubkeys)
 			return
 		}
-
-		s.logger.RelayConnection(relayURL, "failed",
-			zap.String("service_pubkey", conn.ServicePubkey),
-			zap.Strings("pubkeys", pubkeys),
-			zap.Int("attempt", attempt),
-			zap.Int("max_retries", maxRetries),
-			zap.Error(err),
-		)
+		logger.WithFields(map[string]any{
+			"service_pubkey": conn.ServicePubkey,
+			"pubkeys":        pubkeys,
+			"attempt":        attempt,
+			"max_retries":    maxRetries,
+			"error":          err,
+		}).Info("Relay connection failed")
 
 		if attempt < maxRetries {
 			delay := time.Duration(attempt) * baseDelay
-			s.logger.RelayConnection(relayURL, "retrying",
-				zap.String("service_pubkey", conn.ServicePubkey),
-				zap.Duration("delay", delay),
-				zap.Int("next_attempt", attempt+1),
-			)
+			logger.WithFields(map[string]any{
+				"service_pubkey": conn.ServicePubkey,
+				"pubkeys":        pubkeys,
+				"attempt":        attempt,
+				"max_retries":    maxRetries,
+				"error":          err,
+			}).Info("Relay connection failed")
 
+			logger.WithFields(map[string]any{
+				"relay_url":      relayURL,
+				"service_pubkey": conn.ServicePubkey,
+				"delay":          delay,
+				"next_attempt":   attempt + 1,
+			}).Info("Waiting before retry")
 			select {
 			case <-ctx.Done():
-				s.logger.Info("Context cancelled, stopping relay connection retry",
-					zap.String("relay_url", relayURL),
-					zap.String("service_pubkey", conn.ServicePubkey),
-				)
+				logger.WithFields(map[string]any{
+					"relay_url":      relayURL,
+					"service_pubkey": conn.ServicePubkey,
+				}).Info("Context cancelled, stopping relay connection retry")
 				return
 			case <-time.After(delay):
 				// Continue to next attempt
 			}
 		}
 	}
-	s.logger.Error("Failed to connect to relay after all retries",
-		zap.String("relay_url", relayURL),
-		zap.String("service_pubkey", conn.ServicePubkey),
-		zap.Strings("pubkeys", pubkeys),
-		zap.Int("max_retries", maxRetries),
-	)
+
+	logger.WithFields(map[string]interface{}{
+		"relay_url":      relayURL,
+		"service_pubkey": conn.ServicePubkey,
+		"pubkeys":        pubkeys,
+		"max_retries":    maxRetries,
+	}).Error("Failed to connect to relay after all retries")
 }
 
 func (s *NostrService) subscribeToEventsForRelay(ctx context.Context, conn *UserConnection, relay *nostr.Relay, relayURL string, pubkeys []string) {
-	filter := nostr.Filter{
-		Kinds:   []int{23194, 23195, 1, 4, 7, 9735},
-		Authors: pubkeys,
+	filters := nostr.Filters{
+		{
+			Kinds:   []int{23194, 23195, 9735},
+			Authors: pubkeys,
+		},
+		{
+			Authors: pubkeys,
+		},
 	}
 
-	sub, err := relay.Subscribe(ctx, nostr.Filters{filter})
+	sub, err := relay.Subscribe(ctx, filters)
 	if err != nil {
-		s.logger.Error("Failed to subscribe to events",
-			zap.String("relay_url", relayURL),
-			zap.String("service_pubkey", conn.ServicePubkey),
-			zap.Strings("pubkeys", pubkeys),
-			zap.Error(err),
-		)
+		logger.WithFields(map[string]interface{}{
+			"relay_url":      relayURL,
+			"service_pubkey": conn.ServicePubkey,
+			"pubkeys":        pubkeys,
+			"error":          err,
+		}).Error("❌ Failed to subscribe to events")
 		return
 	}
 
@@ -226,23 +246,56 @@ func (s *NostrService) subscribeToEventsForRelay(ctx context.Context, conn *User
 	conn.Subs[relayURL] = sub
 	conn.mu.Unlock()
 
-	s.logger.Info("Subscribed to events",
-		zap.String("relay_url", relayURL),
-		zap.String("service_pubkey", conn.ServicePubkey),
-		zap.Strings("pubkeys", pubkeys),
-	)
+	logger.WithFields(map[string]interface{}{
+		"relay_url":      relayURL,
+		"service_pubkey": conn.ServicePubkey,
+		"pubkeys":        pubkeys,
+	}).Info("✅ Subscribed to relay")
+
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey": conn.ServicePubkey,
+		"pubkeys":        pubkeys,
+	}).Info("🔍 Listening for events from client")
+
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey": conn.ServicePubkey,
+	}).Info("📡 Listening for NWC events (kinds 23194/23195) - content will be shown as encrypted")
 
 	go s.handleEvents(ctx, conn, sub, relayURL)
 }
 
 func (s *NostrService) handleEvents(ctx context.Context, conn *UserConnection, sub *nostr.Subscription, relayURL string) {
-	for ev := range sub.Events {
-		s.logger.NostrEvent("received", ev.ID, ev.PubKey,
-			zap.String("service_pubkey", conn.ServicePubkey),
-			zap.String("relay_url", relayURL),
-			zap.Int("kind", ev.Kind),
-		)
+	logger.WithFields(map[string]interface{}{
+		"relay_url":      relayURL,
+		"service_pubkey": conn.ServicePubkey,
+	}).Info("🎧 Starting event listener for relay")
 
+	<-sub.EndOfStoredEvents
+	logger.WithFields(map[string]interface{}{
+		"relay_url":      relayURL,
+		"service_pubkey": conn.ServicePubkey,
+	}).Info("📡 End of stored events reached - now listening for new events")
+
+	for ev := range sub.Events {
+		eventType := s.getEventType(ev.Kind)
+
+		logger.WithFields(map[string]interface{}{
+			"relay_url":      relayURL,
+			"service_pubkey": conn.ServicePubkey,
+			"event_id":       ev.ID,
+			"event_pubkey":   ev.PubKey,
+			"event_kind":     ev.Kind,
+			"event_type":     eventType,
+			"content_length": len(ev.Content),
+		}).Info("📩 Event received")
+
+		if ev.Kind == 23194 || ev.Kind == 23195 {
+			logger.WithFields(map[string]interface{}{
+				"event_id":        ev.ID,
+				"content_preview": s.getContentPreview(ev.Content),
+				"full_content":    ev.Content,
+			}).Info("🔍 NWC Event Details")
+		}
 		eventData := map[string]interface{}{
 			"id":         ev.ID,
 			"pubkey":     ev.PubKey,
@@ -256,13 +309,18 @@ func (s *NostrService) handleEvents(ctx context.Context, conn *UserConnection, s
 		}
 
 		if err := s.storeEvent(ctx, conn.ServicePubkey, eventData); err != nil {
-			s.logger.Error("Failed to store event", zap.Error(err))
+			logger.WithError(err).Error("Failed to store event")
 		}
 
 		if s.isImportantEvent(ev.Kind) {
 			go s.sendNotification(ctx, conn, ev)
 		}
 	}
+
+	logger.WithFields(map[string]interface{}{
+		"relay_url":      relayURL,
+		"service_pubkey": conn.ServicePubkey,
+	}).Info("🔴 Event listening loop ended")
 }
 
 func (s *NostrService) isImportantEvent(kind int) bool {
@@ -276,7 +334,6 @@ func (s *NostrService) isImportantEvent(kind int) bool {
 	}
 	return importantKinds[kind]
 }
-
 func (s *NostrService) storeEvent(ctx context.Context, userID string, eventData map[string]interface{}) error {
 	key := fmt.Sprintf("nostr_event:%s:%d", userID, time.Now().UnixNano())
 	data, err := json.Marshal(eventData)
@@ -304,19 +361,19 @@ func (s *NostrService) sendNotification(ctx context.Context, conn *UserConnectio
 	key := fmt.Sprintf("notification_queue:%s", conn.ServicePubkey)
 	data, err := json.Marshal(notificationData)
 	if err != nil {
-		s.logger.Error("Failed to marshal notification", zap.Error(err))
+		logger.WithError(err).Error("Failed to marshal notification")
 		return
 	}
 
 	if err := s.redis.LPush(ctx, key, data).Err(); err != nil {
-		s.logger.Error("Failed to queue notification", zap.Error(err))
+		logger.WithError(err).Error("Failed to queue notification")
 	}
 
-	s.logger.Info("Notification queued",
-		zap.String("service_pubkey", conn.ServicePubkey),
-		zap.String("title", title),
-		zap.String("event_id", ev.ID),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey": conn.ServicePubkey,
+		"title":          title,
+		"event_id":       ev.ID,
+	}).Info("Notification queued")
 }
 
 func (s *NostrService) getEventTitle(kind int) string {
@@ -345,6 +402,32 @@ func (s *NostrService) getEventBody(content string) string {
 	return content
 }
 
+func (s *NostrService) getEventType(kind int) string {
+	switch kind {
+	case 1:
+		return "Text Note"
+	case 4:
+		return "Direct Message"
+	case 7:
+		return "Reaction"
+	case 9735:
+		return "Zap"
+	case 23194:
+		return "NWC Request"
+	case 23195:
+		return "NWC Response"
+	default:
+		return "Unknown"
+	}
+}
+
+func (s *NostrService) getContentPreview(content string) string {
+	if len(content) > 80 {
+		return content[:80] + "..."
+	}
+	return content
+}
+
 func (s *NostrService) GetConnection(userID string) (*UserConnection, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -368,18 +451,18 @@ func (s *NostrService) CloseConnection(userID string) error {
 
 	for relayURL, relay := range conn.Relays {
 		relay.Close()
-		s.logger.Info("Closed relay connection",
-			zap.String("relay_url", relayURL),
-			zap.String("user_id", userID),
-		)
+		logger.WithFields(map[string]interface{}{
+			"relay_url": relayURL,
+			"user_id":   userID,
+		}).Info("Closed relay connection")
 	}
 
 	for relayURL, sub := range conn.Subs {
 		sub.Unsub()
-		s.logger.Info("Unsubscribed from relay",
-			zap.String("relay_url", relayURL),
-			zap.String("user_id", userID),
-		)
+		logger.WithFields(map[string]interface{}{
+			"relay_url": relayURL,
+			"user_id":   userID,
+		}).Info("Unsubscribed from relay")
 	}
 
 	delete(s.connections, userID)
@@ -388,7 +471,7 @@ func (s *NostrService) CloseConnection(userID string) error {
 	key := fmt.Sprintf("nostr_connection:%s", userID)
 	s.redis.Del(ctx, key)
 
-	s.logger.Info("Connection closed", zap.String("user_id", userID))
+	logger.WithField("user_id", userID).Info("Connection closed")
 	return nil
 }
 
@@ -404,7 +487,7 @@ func (s *NostrService) GetQueuedNotifications(ctx context.Context, userID string
 	for _, notification := range notifications {
 		var data map[string]interface{}
 		if err := json.Unmarshal([]byte(notification), &data); err != nil {
-			s.logger.Error("Failed to unmarshal notification", zap.Error(err))
+			logger.WithError(err).Error("Failed to unmarshal notification")
 			continue
 		}
 		result = append(result, data)
@@ -418,6 +501,116 @@ func (s *NostrService) ClearNotificationQueue(ctx context.Context, userID string
 	return s.redis.Del(ctx, key).Err()
 }
 
+func (s *NostrService) RestoreConnectionsFromRedis(ctx context.Context) error {
+	logger.Info("🔄 Starting to restore connections from Redis")
+
+	// Get all connection keys from Redis
+	keys, err := s.redis.Keys(ctx, "nostr_connection:*").Result()
+	if err != nil {
+		return fmt.Errorf("failed to get connection keys from Redis: %w", err)
+	}
+
+	if len(keys) == 0 {
+		logger.Info("📭 No existing connections found in Redis")
+		return nil
+	}
+
+	logger.WithField("connection_count", len(keys)).Info("📦 Found existing connections in Redis")
+
+	restoredCount := 0
+	for _, key := range keys {
+		servicePubkey := key[len("nostr_connection:"):]
+
+		data, err := s.redis.Get(ctx, key).Result()
+		if err != nil {
+			logger.WithFields(map[string]interface{}{
+				"service_pubkey": servicePubkey,
+				"error":          err,
+			}).Error("Failed to get connection data from Redis")
+			continue
+		}
+
+		var connData map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &connData); err != nil {
+			logger.WithFields(map[string]interface{}{
+				"service_pubkey": servicePubkey,
+				"error":          err,
+			}).Error("Failed to unmarshal connection data")
+			continue
+		}
+
+		connectionsData, ok := connData["connections"].([]interface{})
+		if !ok {
+			logger.WithField("service_pubkey", servicePubkey).Error("Invalid connections data format")
+			continue
+		}
+
+		var connections []Connection
+		for _, connData := range connectionsData {
+			connMap, ok := connData.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			relayURL, _ := connMap["relay"].(string)
+			pubkey, _ := connMap["pubkey"].(string)
+
+			if relayURL != "" && pubkey != "" {
+				connections = append(connections, Connection{
+					RelayURL: relayURL,
+					PubKey:   pubkey,
+				})
+			}
+		}
+
+		if len(connections) == 0 {
+			logger.WithField("service_pubkey", servicePubkey).Warn("No valid connections found for service")
+			continue
+		}
+
+		// Extract device token
+		deviceToken, _ := connData["device_token"].(string)
+		if deviceToken == "" {
+			logger.WithField("service_pubkey", servicePubkey).Warn("No device token found for service")
+			continue
+		}
+
+		// Create UserConnection
+		conn := &UserConnection{
+			ServicePubkey: servicePubkey,
+			DeviceToken:   deviceToken,
+			Connections:   connections,
+			Relays:        make(map[string]*nostr.Relay),
+			Subs:          make(map[string]*nostr.Subscription),
+			CreatedAt:     time.Now(), // Update creation time
+		}
+
+		// Store in memory
+		s.mu.Lock()
+		s.connections[servicePubkey] = conn
+		s.mu.Unlock()
+
+		// Start connecting to relays
+		bgCtx := context.Background()
+		go s.connectToRelays(bgCtx, conn)
+		go s.startConnectionHealthCheck(bgCtx, conn)
+
+		restoredCount++
+
+		logger.WithFields(map[string]interface{}{
+			"service_pubkey":    servicePubkey,
+			"connections_count": len(connections),
+		}).Info("✅ Restored connection from Redis")
+	}
+
+	logger.WithFields(map[string]interface{}{
+		"total_found":    len(keys),
+		"restored_count": restoredCount,
+	}).Info("🎉 Connection restoration completed")
+
+	return nil
+}
+
 func (s *NostrService) reconnectToRelayWithPubkeys(ctx context.Context, conn *UserConnection, relayURL string, pubkeys []string) {
 	const maxRetries = 5
 	const baseDelay = 5 * time.Second
@@ -429,10 +622,10 @@ func (s *NostrService) reconnectToRelayWithPubkeys(ctx context.Context, conn *Us
 		s.mu.RUnlock()
 
 		if !exists {
-			s.logger.Info("Connection no longer exists, stopping reconnection",
-				zap.String("service_pubkey", conn.ServicePubkey),
-				zap.String("relay_url", relayURL),
-			)
+			logger.WithFields(map[string]interface{}{
+				"service_pubkey": conn.ServicePubkey,
+				"relay_url":      relayURL,
+			}).Info("Connection no longer exists, stopping reconnection")
 			return
 		}
 		delay := time.Duration(attempt) * baseDelay
@@ -440,20 +633,20 @@ func (s *NostrService) reconnectToRelayWithPubkeys(ctx context.Context, conn *Us
 			delay = maxDelay
 		}
 
-		s.logger.Info("Attempting relay reconnection",
-			zap.String("relay_url", relayURL),
-			zap.String("service_pubkey", conn.ServicePubkey),
-			zap.Strings("pubkeys", pubkeys),
-			zap.Int("attempt", attempt),
-			zap.Duration("delay", delay),
-		)
+		logger.WithFields(map[string]interface{}{
+			"relay_url":      relayURL,
+			"service_pubkey": conn.ServicePubkey,
+			"pubkeys":        pubkeys,
+			"attempt":        attempt,
+			"delay":          delay,
+		}).Info("Attempting relay reconnection")
 
 		select {
 		case <-ctx.Done():
-			s.logger.Info("Context cancelled, stopping relay reconnection",
-				zap.String("relay_url", relayURL),
-				zap.String("service_pubkey", conn.ServicePubkey),
-			)
+			logger.WithFields(map[string]interface{}{
+				"relay_url":      relayURL,
+				"service_pubkey": conn.ServicePubkey,
+			}).Info("Context cancelled, stopping relay reconnection")
 			return
 		case <-time.After(delay):
 			// Continue to reconnection attempt
@@ -465,33 +658,33 @@ func (s *NostrService) reconnectToRelayWithPubkeys(ctx context.Context, conn *Us
 			conn.Relays[relayURL] = relay
 			conn.mu.Unlock()
 
-			s.logger.Info("Successfully reconnected to relay",
-				zap.String("relay_url", relayURL),
-				zap.String("service_pubkey", conn.ServicePubkey),
-				zap.Strings("pubkeys", pubkeys),
-				zap.Int("attempt", attempt),
-			)
+			logger.WithFields(map[string]interface{}{
+				"relay_url":      relayURL,
+				"service_pubkey": conn.ServicePubkey,
+				"pubkeys":        pubkeys,
+				"attempt":        attempt,
+			}).Info("Successfully reconnected to relay")
 
 			s.subscribeToEventsForRelay(ctx, conn, relay, relayURL, pubkeys)
 			return
 		}
 
-		s.logger.Warn("Failed to reconnect to relay",
-			zap.String("relay_url", relayURL),
-			zap.String("service_pubkey", conn.ServicePubkey),
-			zap.Strings("pubkeys", pubkeys),
-			zap.Int("attempt", attempt),
-			zap.Int("max_retries", maxRetries),
-			zap.Error(err),
-		)
+		logger.WithFields(map[string]interface{}{
+			"relay_url":      relayURL,
+			"service_pubkey": conn.ServicePubkey,
+			"pubkeys":        pubkeys,
+			"attempt":        attempt,
+			"max_retries":    maxRetries,
+			"error":          err,
+		}).Warn("Failed to reconnect to relay")
 	}
 
-	s.logger.Error("Failed to reconnect to relay after all retries",
-		zap.String("relay_url", relayURL),
-		zap.String("service_pubkey", conn.ServicePubkey),
-		zap.Strings("pubkeys", pubkeys),
-		zap.Int("max_retries", maxRetries),
-	)
+	logger.WithFields(map[string]interface{}{
+		"relay_url":      relayURL,
+		"service_pubkey": conn.ServicePubkey,
+		"pubkeys":        pubkeys,
+		"max_retries":    maxRetries,
+	}).Error("Failed to reconnect to relay after all retries")
 }
 
 func (s *NostrService) startConnectionHealthCheck(ctx context.Context, conn *UserConnection) {
@@ -518,11 +711,11 @@ func (s *NostrService) checkConnectionHealth(ctx context.Context, conn *UserConn
 
 	for relayURL, relay := range relays {
 		if relay.ConnectionError != nil {
-			s.logger.Warn("Relay connection has error, attempting reconnection",
-				zap.String("relay_url", relayURL),
-				zap.String("service_pubkey", conn.ServicePubkey),
-				zap.Error(relay.ConnectionError),
-			)
+			logger.WithFields(map[string]interface{}{
+				"relay_url":      relayURL,
+				"service_pubkey": conn.ServicePubkey,
+				"error":          relay.ConnectionError,
+			}).Warn("Relay connection has error, attempting reconnection")
 
 			var pubkeys []string
 			for _, connection := range conn.Connections {
@@ -538,6 +731,64 @@ func (s *NostrService) checkConnectionHealth(ctx context.Context, conn *UserConn
 
 				go s.reconnectToRelayWithPubkeys(ctx, conn, relayURL, pubkeys)
 			}
+		}
+	}
+}
+
+func (s *NostrService) StartEventListening(ctx context.Context) {
+	logger.Info("🚀 Starting continuous Nostr event listening service")
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("🛑 Continuous event listening service stopped")
+			return
+		case <-ticker.C:
+			s.monitorActiveConnections()
+		}
+	}
+}
+
+func (s *NostrService) monitorActiveConnections() {
+	s.mu.RLock()
+	connections := make(map[string]*UserConnection)
+	maps.Copy(connections, s.connections)
+	s.mu.RUnlock()
+
+	if len(connections) == 0 {
+		logger.Debug("No active connections to monitor")
+		return
+	}
+
+	logger.WithField("active_connections", len(connections)).Info("🔍 Monitoring active connections")
+
+	for servicePubkey, conn := range connections {
+		conn.mu.RLock()
+		relayCount := len(conn.Relays)
+		subCount := len(conn.Subs)
+		conn.mu.RUnlock()
+
+		// Log connection status periodically
+		logger.WithFields(map[string]interface{}{
+			"service_pubkey":     servicePubkey,
+			"relay_count":        relayCount,
+			"subscription_count": subCount,
+		}).Info("📊 Connection status check")
+
+		// If we have connections but no relays or subscriptions, something is wrong
+		if len(conn.Connections) > 0 && (relayCount == 0 || subCount == 0) {
+			logger.WithFields(map[string]interface{}{
+				"service_pubkey":     servicePubkey,
+				"relay_count":        relayCount,
+				"subscription_count": subCount,
+				"connection_count":   len(conn.Connections),
+			}).Warn("⚠️ Connection has no active relays or subscriptions - attempting to reconnect")
+
+			// Attempt to reconnect
+			bgCtx := context.Background()
+			go s.connectToRelays(bgCtx, conn)
 		}
 	}
 }

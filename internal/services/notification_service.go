@@ -11,13 +11,12 @@ import (
 	"github.com/sideshow/apns2/payload"
 	"github.com/sideshow/apns2/token"
 	"github.com/zeusln/ios-nwc-server/internal/config"
-	"go.uber.org/zap"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
 type NotificationService struct {
 	config *config.APNSConfig
 	redis  *redis.Client
-	logger *zap.Logger
 	client *apns2.Client
 }
 
@@ -40,13 +39,13 @@ type DeviceToken struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func NewNotificationService(cfg *config.APNSConfig, redisClient *redis.Client, logger *zap.Logger) *NotificationService {
+func NewNotificationService(cfg *config.APNSConfig, redisClient *redis.Client) *NotificationService {
 	var client *apns2.Client
 
 	if cfg.Enabled && cfg.KeyPath != "" && cfg.KeyID != "" && cfg.TeamID != "" {
 		authKey, err := token.AuthKeyFromFile(cfg.KeyPath)
 		if err != nil {
-			logger.Error("Failed to load APNS auth key", zap.Error(err))
+			logger.WithError(err).Error("Failed to load APNS auth key")
 		} else {
 			authToken := &token.Token{
 				AuthKey: authKey,
@@ -65,7 +64,6 @@ func NewNotificationService(cfg *config.APNSConfig, redisClient *redis.Client, l
 	return &NotificationService{
 		config: cfg,
 		redis:  redisClient,
-		logger: logger,
 		client: client,
 	}
 }
@@ -103,11 +101,11 @@ func (ns *NotificationService) SendNotification(ctx context.Context, deviceToken
 		return fmt.Errorf("APNS error: %s (status: %d)", res.Reason, res.StatusCode)
 	}
 
-	ns.logger.Info("Notification sent successfully",
-		zap.String("device_token", deviceToken[:8]+"..."),
-		zap.String("title", notification.Title),
-		zap.String("apns_id", res.ApnsID),
-	)
+	logger.WithFields(map[string]interface{}{
+		"device_token": deviceToken[:8] + "...",
+		"title":        notification.Title,
+		"apns_id":      res.ApnsID,
+	}).Info("Notification sent successfully")
 
 	return nil
 }
@@ -153,10 +151,10 @@ func (ns *NotificationService) RegisterDevice(ctx context.Context, userID, devic
 	tokenKey := fmt.Sprintf("user_by_token:%s", deviceToken)
 	ns.redis.Set(ctx, tokenKey, userID, 0)
 
-	ns.logger.Info("Device registered successfully",
-		zap.String("user_id", userID),
-		zap.String("device_token", deviceToken[:8]+"..."),
-	)
+	logger.WithFields(map[string]interface{}{
+		"user_id":      userID,
+		"device_token": deviceToken[:8] + "...",
+	}).Info("Device registered successfully")
 
 	return nil
 }
@@ -191,7 +189,7 @@ func (ns *NotificationService) UnregisterDevice(ctx context.Context, userID stri
 		return fmt.Errorf("failed to remove device token: %w", err)
 	}
 
-	ns.logger.Info("Device unregistered successfully", zap.String("user_id", userID))
+	logger.WithField("user_id", userID).Info("Device unregistered successfully")
 	return nil
 }
 

@@ -14,46 +14,52 @@ import (
 	"github.com/zeusln/ios-nwc-server/internal/handler"
 	"github.com/zeusln/ios-nwc-server/internal/server"
 	"github.com/zeusln/ios-nwc-server/internal/services"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 	"github.com/zeusln/ios-nwc-server/pkg/redis"
-	"github.com/zeusln/ios-nwc-server/pkg/utils"
-	"go.uber.org/zap"
 )
 
 func main() {
 	cfg := config.Load()
 
-	logger, err := utils.NewLogger(&utils.Config{
-		Level:       utils.LogLevel(cfg.Log.Level),
+	err := logger.Init(logger.Config{
+		Level:       "debug",
 		Environment: cfg.Log.Environment,
-		ServiceName: cfg.Log.ServiceName,
-		PrettyPrint: cfg.Log.PrettyPrint,
-		Colorful:    cfg.Log.Colorful,
+		Service:     cfg.Log.ServiceName,
+		Version:     "1.2.0",
+		File:        "logs/app.log",
+		MaxSize:     100,
+		MaxBackups:  5,
+		MaxAge:      30,
+		Compress:    true,
 	})
 	if err != nil {
-		fmt.Printf("❌ Failed to initialize logger: %v\n", err)
-		os.Exit(1)
+		panic(err)
 	}
 
-	logger.ServiceStart("Zeus NWC Server", "1.0.0",
-		zap.String("environment", cfg.Log.Environment),
-	)
+	logger.Info("Zeus NWC Server")
 
 	if err := redis.Init(cfg); err != nil {
-		logger.Error("Failed to initialize Redis", zap.Error(err))
+		logger.WithError(err).Error("Failed to initialize Redis")
 		os.Exit(1)
 	}
 	logger.Info("Redis initialized successfully")
 
-	serviceManager := services.NewServiceManager(cfg, logger.Logger)
+	serviceManager := services.NewServiceManager(cfg)
 	logger.Info("Services initialized successfully")
 
-	go startNotificationProcessor(context.Background(), serviceManager, logger.Logger)
+	ctx := context.Background()
+	if err := serviceManager.RestoreConnections(ctx); err != nil {
+		logger.WithError(err).Error("Failed to restore connections from Redis")
+	}
+
+	go serviceManager.StartEventListening(context.Background())
+	go startNotificationProcessor(context.Background(), serviceManager)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
 
 	handlerManager := handler.NewHandlerManager(serviceManager)
-	server.SetupRoutes(router, cfg.ToMiddlewareSecurityConfig(), handlerManager, logger.Logger)
+	server.SetupRoutes(router, cfg.ToMiddlewareSecurityConfig(), handlerManager)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Server.Port,
@@ -64,13 +70,13 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("Starting HTTP server",
-			zap.String("port", cfg.Server.Port),
-			zap.String("environment", cfg.Log.Environment),
-		)
+		logger.WithFields(map[string]interface{}{
+			"port":        cfg.Server.Port,
+			"environment": cfg.Log.Environment,
+		}).Info("Starting HTTP server")
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Critical("Failed to start server", zap.Error(err))
+			logger.WithError(err).Fatal("Failed to start server")
 			os.Exit(1)
 		}
 	}()
@@ -85,17 +91,17 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		logger.Error("Server forced to shutdown", zap.Error(err))
+		logger.WithError(err).Error("Server forced to shutdown")
 	}
 
 	if err := redis.Close(); err != nil {
-		logger.Error("Failed to close Redis connection", zap.Error(err))
+		logger.WithError(err).Error("Failed to close Redis connection")
 	}
 
-	logger.ServiceStop("Zeus NWC Server")
+	logger.Info("Zeus NWC Server stopped")
 }
 
-func startNotificationProcessor(ctx context.Context, serviceManager *services.ServiceManager, logger *zap.Logger) {
+func startNotificationProcessor(ctx context.Context, serviceManager *services.ServiceManager) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -104,16 +110,16 @@ func startNotificationProcessor(ctx context.Context, serviceManager *services.Se
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			processQueuedNotifications(ctx, serviceManager, logger)
+			processQueuedNotifications(ctx, serviceManager)
 		}
 	}
 }
 
-func processQueuedNotifications(ctx context.Context, serviceManager *services.ServiceManager, logger *zap.Logger) {
+func processQueuedNotifications(ctx context.Context, serviceManager *services.ServiceManager) {
 	redisClient := redis.GetClient()
 	keys, err := redisClient.Keys(ctx, "notification_queue:*").Result()
 	if err != nil {
-		logger.Error("Failed to get notification queue keys", zap.Error(err))
+		logger.WithError(err).Error("Failed to get notification queue keys")
 		return
 	}
 
@@ -122,14 +128,14 @@ func processQueuedNotifications(ctx context.Context, serviceManager *services.Se
 
 		notifications, err := serviceManager.GetNostrService().GetQueuedNotifications(ctx, servicePubkey)
 		if err != nil {
-			logger.Error("Failed to get queued notifications", zap.String("service_pubkey", servicePubkey), zap.Error(err))
+			logger.WithError(err).Error("Failed to get queued notifications", "service_pubkey", servicePubkey)
 			continue
 		}
 
 		for _, notificationData := range notifications {
 			deviceToken, ok := notificationData["device_token"].(string)
 			if !ok {
-				logger.Error("Invalid device token in notification", zap.String("service_pubkey", servicePubkey))
+				logger.WithError(err).Error("Invalid device token in notification", "service_pubkey", servicePubkey)
 				continue
 			}
 
@@ -153,14 +159,17 @@ func processQueuedNotifications(ctx context.Context, serviceManager *services.Se
 			}
 
 			if err := serviceManager.GetNotificationService().SendNotification(ctx, deviceToken, notification); err != nil {
-				logger.Error("Failed to send notification", zap.String("service_pubkey", servicePubkey), zap.Error(err))
+				logger.WithError(err).Error("Failed to send notification", "service_pubkey", servicePubkey)
 			} else {
-				logger.Info("Notification sent successfully", zap.String("service_pubkey", servicePubkey), zap.String("title", title))
+				logger.WithFields(map[string]interface{}{
+					"service_pubkey": servicePubkey,
+					"title":          title,
+				}).Info("Notification sent successfully")
 			}
 		}
 
 		if err := serviceManager.GetNostrService().ClearNotificationQueue(ctx, servicePubkey); err != nil {
-			logger.Error("Failed to clear notification queue", zap.String("service_pubkey", servicePubkey), zap.Error(err))
+			logger.WithError(err).Error("Failed to clear notification queue", "service_pubkey", servicePubkey)
 		}
 	}
 }

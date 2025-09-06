@@ -6,9 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 	"github.com/zeusln/ios-nwc-server/pkg/redis"
-	"github.com/zeusln/ios-nwc-server/pkg/utils"
-	"go.uber.org/zap"
 )
 
 type HealthStatus struct {
@@ -38,12 +37,10 @@ type CheckInfo struct {
 var startTime = time.Now()
 
 func HealthCheck(c *gin.Context) {
-	logger := utils.GetLogger()
-
-	logger.Info("Health check requested",
-		zap.String("ip", c.ClientIP()),
-		zap.String("user_agent", c.Request.UserAgent()),
-	)
+	logger.WithFields(map[string]interface{}{
+		"ip":         c.ClientIP(),
+		"user_agent": c.Request.UserAgent(),
+	}).Info("Health check requested")
 
 	checks := make(map[string]CheckInfo)
 	checks["redis"] = checkRedis()

@@ -5,25 +5,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/zeusln/ios-nwc-server/internal/services"
-	"go.uber.org/zap"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
 type HandoffHandler struct {
 	handoffService *services.HandoffService
-	logger         *zap.Logger
 }
 
-func NewHandoffHandler(handoffService *services.HandoffService, logger *zap.Logger) *HandoffHandler {
+func NewHandoffHandler(handoffService *services.HandoffService) *HandoffHandler {
 	return &HandoffHandler{
 		handoffService: handoffService,
-		logger:         logger,
 	}
 }
 
 func (h *HandoffHandler) HandleHandoff(c *gin.Context) {
 	var req services.HandoffRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		h.logger.Error("Invalid handoff request", zap.Error(err))
+		logger.WithError(err).Error("Invalid handoff request")
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Invalid request",
 			"details": err.Error(),
@@ -33,17 +31,17 @@ func (h *HandoffHandler) HandleHandoff(c *gin.Context) {
 
 	response, err := h.handoffService.ProcessHandoff(c.Request.Context(), &req)
 	if err != nil {
-		h.logger.Error("Failed to process handoff", zap.Error(err))
+		logger.WithError(err).Error("Failed to process handoff")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to process handoff request",
 		})
 		return
 	}
 
-	h.logger.Info("Handoff processed successfully",
-		zap.String("service_pubkey", req.ServicePubkey),
-		zap.Int("connections_count", len(req.Connections)),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey":    req.ServicePubkey,
+		"connections_count": len(req.Connections),
+	}).Info("Handoff processed successfully")
 
 	c.JSON(http.StatusOK, response)
 }
@@ -59,14 +57,14 @@ func (h *HandoffHandler) HandleDisconnect(c *gin.Context) {
 
 	err := h.handoffService.DisconnectDevice(c.Request.Context(), userID)
 	if err != nil {
-		h.logger.Error("Failed to disconnect device", zap.Error(err))
+		logger.WithError(err).Error("Failed to disconnect device")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to disconnect device",
 		})
 		return
 	}
 
-	h.logger.Info("Device disconnected successfully", zap.String("user_id", userID))
+	logger.WithField("user_id", userID).Info("Device disconnected successfully")
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Device disconnected successfully",

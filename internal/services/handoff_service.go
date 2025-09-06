@@ -8,14 +8,13 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/zeusln/ios-nwc-server/internal/config"
-	"go.uber.org/zap"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
 type HandoffService struct {
 	config       *config.Config
 	nostrService *NostrService
 	redis        *redis.Client
-	logger       *zap.Logger
 }
 
 type HandoffResponse struct {
@@ -25,20 +24,19 @@ type HandoffResponse struct {
 	Connections   []Connection `json:"connections"`
 }
 
-func NewHandoffService(cfg *config.Config, nostrService *NostrService, redisClient *redis.Client, logger *zap.Logger) *HandoffService {
+func NewHandoffService(cfg *config.Config, nostrService *NostrService, redisClient *redis.Client) *HandoffService {
 	return &HandoffService{
 		config:       cfg,
 		nostrService: nostrService,
 		redis:        redisClient,
-		logger:       logger,
 	}
 }
 
 func (s *HandoffService) ProcessHandoff(ctx context.Context, req *HandoffRequest) (*HandoffResponse, error) {
-	s.logger.Info("Processing handoff request",
-		zap.String("service_pubkey", req.ServicePubkey),
-		zap.Int("connections_count", len(req.Connections)),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey":    req.ServicePubkey,
+		"connections_count": len(req.Connections),
+	}).Info("Processing handoff request")
 
 	if err := s.validateRequest(req); err != nil {
 		return nil, fmt.Errorf("invalid request: %w", err)
@@ -59,10 +57,10 @@ func (s *HandoffService) ProcessHandoff(ctx context.Context, req *HandoffRequest
 		Connections:   req.Connections,
 	}
 
-	s.logger.Info("Handoff processed successfully",
-		zap.String("service_pubkey", req.ServicePubkey),
-		zap.Int("connections_count", len(req.Connections)),
-	)
+	logger.WithFields(map[string]interface{}{
+		"service_pubkey":    req.ServicePubkey,
+		"connections_count": len(req.Connections),
+	}).Info("Handoff processed successfully")
 
 	return response, nil
 }
@@ -123,10 +121,10 @@ func (s *HandoffService) GetDeviceInfo(ctx context.Context, userID string) (map[
 }
 
 func (s *HandoffService) DisconnectDevice(ctx context.Context, userID string) error {
-	s.logger.Info("Disconnecting device", zap.String("user_id", userID))
+	logger.WithField("user_id", userID).Info("Disconnecting device")
 
 	if err := s.nostrService.CloseConnection(userID); err != nil {
-		s.logger.Error("Failed to close nostr connection", zap.Error(err))
+		logger.WithError(err).Error("Failed to close nostr connection")
 	}
 
 	key := fmt.Sprintf("device_info:%s", userID)
@@ -144,6 +142,6 @@ func (s *HandoffService) DisconnectDevice(ctx context.Context, userID string) er
 		return err
 	}
 
-	s.logger.Info("Device disconnected successfully", zap.String("user_id", userID))
+	logger.WithField("user_id", userID).Info("Device disconnected successfully")
 	return nil
 }

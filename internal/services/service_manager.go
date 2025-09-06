@@ -1,10 +1,10 @@
 package services
 
 import (
+	"context"
+
 	"github.com/zeusln/ios-nwc-server/internal/config"
 	"github.com/zeusln/ios-nwc-server/pkg/redis"
-	"github.com/zeusln/ios-nwc-server/pkg/utils"
-	"go.uber.org/zap"
 )
 
 type ServiceManager struct {
@@ -14,13 +14,12 @@ type ServiceManager struct {
 	NotificationService *NotificationService
 }
 
-func NewServiceManager(cfg *config.Config, logger *zap.Logger) *ServiceManager {
+func NewServiceManager(cfg *config.Config) *ServiceManager {
 	redisClient := redis.GetClient()
 
-	utilsLogger := &utils.Logger{Logger: logger}
-	nostrService := NewNostrService(cfg, redisClient, utilsLogger)
-	handoffService := NewHandoffService(cfg, nostrService, redisClient, logger)
-	notificationService := NewNotificationService(&cfg.Notifications.APNS, redisClient, logger)
+	nostrService := NewNostrService(cfg, redisClient)
+	handoffService := NewHandoffService(cfg, nostrService, redisClient)
+	notificationService := NewNotificationService(&cfg.Notifications.APNS, redisClient)
 
 	return &ServiceManager{
 		Config:              cfg,
@@ -40,6 +39,14 @@ func (sm *ServiceManager) GetHandoffService() *HandoffService {
 
 func (sm *ServiceManager) GetNotificationService() *NotificationService {
 	return sm.NotificationService
+}
+
+func (sm *ServiceManager) RestoreConnections(ctx context.Context) error {
+	return sm.NostrService.RestoreConnectionsFromRedis(ctx)
+}
+
+func (sm *ServiceManager) StartEventListening(ctx context.Context) {
+	sm.NostrService.StartEventListening(ctx)
 }
 
 func (sm *ServiceManager) Shutdown() {

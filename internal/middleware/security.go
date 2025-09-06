@@ -6,8 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/zeusln/ios-nwc-server/pkg/utils"
-	"go.uber.org/zap"
+	"github.com/zeusln/ios-nwc-server/pkg/logger"
 	"golang.org/x/time/rate"
 )
 
@@ -66,11 +65,10 @@ func (rl *RateLimiter) RateLimit() gin.HandlerFunc {
 		ip := getClientIP(c)
 
 		if !rl.getLimiter(ip).Allow() {
-			logger := utils.GetLogger()
-			logger.Warn("Rate limit exceeded",
-				zap.String("ip", ip),
-				zap.String("path", c.Request.URL.Path),
-			)
+			logger.WithFields(map[string]interface{}{
+				"ip":   ip,
+				"path": c.Request.URL.Path,
+			}).Warn("Rate limit exceeded")
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Rate limit exceeded"})
 			c.Abort()
 			return
@@ -112,11 +110,10 @@ func IPFilter(config *SecurityConfig) gin.HandlerFunc {
 		ip := getClientIP(c)
 
 		if isIPBlocked(ip, config.BlockedIPs) {
-			logger := utils.GetLogger()
-			logger.Warn("Blocked IP access attempt",
-				zap.String("ip", ip),
-				zap.String("path", c.Request.URL.Path),
-			)
+			logger.WithFields(map[string]interface{}{
+				"ip":   ip,
+				"path": c.Request.URL.Path,
+			}).Warn("Blocked IP access attempt")
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 			c.Abort()
 			return
@@ -153,23 +150,28 @@ func RequestLogger() gin.HandlerFunc {
 		statusCode := c.Writer.Status()
 		bodySize := c.Writer.Size()
 
-		logger := utils.GetLogger()
-		reqLogger := logger.WithHTTPRequest(method, path, clientIP)
-
 		if statusCode >= 400 {
-			reqLogger.WithDuration(latency).Error("HTTP Request Failed",
-				zap.Int("status", statusCode),
-				zap.Int("body_size", bodySize),
-				zap.String("raw_query", raw),
-				zap.String("user_agent", c.Request.UserAgent()),
-			)
+			logger.WithFields(map[string]interface{}{
+				"method":     method,
+				"path":       path,
+				"client_ip":  clientIP,
+				"status":     statusCode,
+				"body_size":  bodySize,
+				"raw_query":  raw,
+				"user_agent": c.Request.UserAgent(),
+				"latency":    latency,
+			}).Error("HTTP Request Failed")
 		} else {
-			reqLogger.WithDuration(latency).Info("HTTP Request",
-				zap.Int("status", statusCode),
-				zap.Int("body_size", bodySize),
-				zap.String("raw_query", raw),
-				zap.String("user_agent", c.Request.UserAgent()),
-			)
+			logger.WithFields(map[string]interface{}{
+				"method":     method,
+				"path":       path,
+				"client_ip":  clientIP,
+				"status":     statusCode,
+				"body_size":  bodySize,
+				"raw_query":  raw,
+				"user_agent": c.Request.UserAgent(),
+				"latency":    latency,
+			}).Info("HTTP Request")
 		}
 	}
 }
