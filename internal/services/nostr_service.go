@@ -85,55 +85,79 @@ func (s *NostrService) HandleRestore(ctx context.Context, deviceToken string) (H
 }
 
 func (s *NostrService) startListener(handoff Handoff) {
-	if cancel, ok := s.listeners.LoadAndDelete(handoff.DeviceToken); ok {
-		cancel.(context.CancelFunc)()
-	}
+    if cancel, ok := s.listeners.LoadAndDelete(handoff.DeviceToken); ok {
+        cancel.(context.CancelFunc)()
+    }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
-	s.listeners.Store(handoff.DeviceToken, cancel)
+    ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
+    s.listeners.Store(handoff.DeviceToken, cancel)
 
-	relayPubkeys := make(map[string][]string)
-	for _, conn := range handoff.Connections {
-		relayPubkeys[conn.RelayURL] = append(relayPubkeys[conn.RelayURL], conn.PubKey)
-	}
+    for _, conn := range handoff.Connections {
+        relay := s.getOrConnectRelay(conn.RelayURL)
+        if relay == nil {
+            continue
+        }
 
-	for relayURL, pubkeys := range relayPubkeys {
-		relay := s.getOrConnectRelay(relayURL)
-		if relay == nil {
-			continue
-		}
-		now:=nostr.Now()
-		filters := []nostr.Filter{{Kinds: []int{23194}, Authors: pubkeys,Since:&now}}
-		logger.WithField("relay_url", relayURL).Info("filters", filters)
-		sub, err := relay.Subscribe(ctx, filters)
-		if err != nil {
-			logger.WithField("relay_url", relayURL).Error("failed to subscribe")
-			continue
-		}
-
-		go func(sub *nostr.Subscription) {
-			logger.WithField("relay_url", relayURL).Info("event listening start")
-			defer sub.Unsub()
-			logger.WithField("relay_url", relayURL).Info("event listening start.......")
-			logger.WithField("relay_url", relayURL).Info("event listening start....... wait for events")
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case ev := <-sub.Events:
-					logger.WithField("relay_url", relayURL).Info("event received")
-					s.cacheEvent(handoff.DeviceToken, ev)
-				}
-			}
-		}(sub)
-	}
+        go s.listenAuthor(ctx, handoff.DeviceToken, relay, conn.RelayURL, conn.PubKey)
+    }
 }
+
+func (s *NostrService) listenAuthor(ctx context.Context, deviceToken string, relay *nostr.Relay, relayURL, pubkey string) {
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        default:
+        }
+        now := nostr.Now()
+        filters := []nostr.Filter{{
+            Kinds:   []int{nostr.KindNWCWalletRequest},
+            Authors: []string{pubkey},
+            Since:   &now,
+        }}
+        logger.WithField("relay_url", relayURL).WithField("author", pubkey).Info("subscribing with filter")
+
+        sub, err := relay.Subscribe(ctx, filters)
+        if err != nil {
+            logger.WithField("relay_url", relayURL).WithError(err).Error("failed to subscribe")
+            time.Sleep(5 * time.Second)
+            continue // retry
+        }
+        // Listen loop
+        for {
+            select {
+            case <-ctx.Done():
+                sub.Unsub()
+                return
+            case <-sub.EndOfStoredEvents:
+                logger.WithField("relay_url", relayURL).WithField("author", pubkey).Info("end of stored events")
+            case ev, ok := <-sub.Events:
+                if !ok {
+                    logger.WithField("relay_url", relayURL).WithField("author", pubkey).Warn("subscription closed, retrying…")
+                    time.Sleep(3 * time.Second)
+                    sub.Unsub()
+                    goto RETRY
+                }
+                if ev == nil {
+                    continue
+                }
+                logger.WithField("relay_url", relayURL).WithField("author", pubkey).Info("event received")
+                s.cacheEvent(deviceToken, ev)
+            }
+        }
+
+    RETRY:
+        continue
+    }
+}
+
+
 
 func (s *NostrService) getOrConnectRelay(url string) *nostr.Relay {
 	if r, ok := s.relayPool.Load(url); ok {
 		return r.(*nostr.Relay)
 	}
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		relay, err := nostr.RelayConnect(context.Background(), url)
 		if err == nil {
 			s.relayPool.Store(url, relay)
