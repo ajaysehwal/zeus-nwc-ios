@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/nbd-wtf/go-nostr"
 	"github.com/zeusln/ios-nwc-server/internal/config"
 	"github.com/zeusln/ios-nwc-server/internal/handler"
 	"github.com/zeusln/ios-nwc-server/internal/server"
@@ -44,20 +44,76 @@ func main() {
 	}
 	logger.Info("Redis initialized successfully")
 
-	serviceManager := services.NewServiceManager(cfg)
-	logger.Info("Services initialized successfully")
-
 	ctx := context.Background()
-	if err := serviceManager.RestoreConnections(ctx); err != nil {
-		logger.WithError(err).Error("Failed to restore connections from Redis")
+	relay, err := nostr.RelayConnect(ctx, "wss://relay.getalby.com/v1")
+	if err != nil {
+		logger.Error("❌ relay connect failed")
+		return
 	}
 
-	go serviceManager.StartEventListening(context.Background())
-	go startNotificationProcessor(context.Background(), serviceManager)
+	// Subscribe to NWC events (kinds 23194 for requests, 23195 for responses)
+	// Replace the hardcoded pubkey with your actual client pubkey from the NWC service
+	clientPubkey := []string{
+		"aa211add5cea5958dd286a1aad0ee0143e096a33f93782fe1c7fdbe95f3652ef",
+	}
+	// clientPubkey2 := "1d3a093d85157e0cb3e768dd4b056af38b4e6b1f8f1591e802ad5a7e000d24d9"
+	 // TODO: Replace with actual client pubkey
 
+	//  filters=nostr.Filters{"kinds":[]int{23194,23195,9735},"authors":[]string{"294b59ffe41b7ff19cce16c0026f271b59d8d0754968f1120dfeaf90778fe902","5233be0ca6e77d1a173daf62d47c6271a317a5f51d38087397528c5642d866cd"},"since":},{"authors":["294b59ffe41b7ff19cce16c0026f271b59d8d0754968f1120dfeaf90778fe902","5233be0ca6e77d1a173daf62d47c6271a317a5f51d38087397528c5642d866cd"]}]
+	now := nostr.Now()
+	sub, err := relay.Subscribe(ctx, nostr.Filters{
+		{
+			Kinds:   []int{23194, 23195,9735}, // NWC request and response events
+			Authors: clientPubkey,
+			Since:   &now,
+		},
+		// Also isten for any events from the client (including other kinds)
+		{
+			Authors: clientPubkey,
+		},
+	})
+
+
+	if err != nil {
+		logger.Error("❌ subscribe failed")
+		return
+	}
+
+	logger.Info("✅ Subscribed to relay",)
+	logger.Info("🔍 Listening for events from client",)
+	logger.Info("📋 To get your client pubkey, run your NWC service and copy the 'client pubkey' from the console output")
+	logger.Info("📡 Listening for NWC events (kinds 23194/23195) - content will be shown as encrypted")
+
+	go func() {
+		// <-sub.EndOfStoredEvents
+		logger.Info("📡 started")
+		for ev := range sub.Events {
+			// Enhanced logging for NWC events
+			eventType := "Unknown"
+			switch ev.Kind {
+            case 23194:
+				eventType = "NWC Request"
+			case 23195:
+				eventType = "NWC Response"
+			case 1:
+				eventType = "Text Note"
+			}
+
+			logger.Info("📩 Event received")
+
+			// Log NWC-specific information (encrypted content)
+			if ev.Kind == 23194 || ev.Kind == 23195 {
+				logger.Info("🔍 NWC Event Details")
+				logger.Info(eventType)
+			}
+		}
+	}()
+
+
+	serviceManager := services.NewServiceManager(cfg)
+	logger.Info("Services initialized successfully")
 	router := gin.New()
 	router.Use(gin.Recovery())
-
 	handlerManager := handler.NewHandlerManager(serviceManager)
 	server.SetupRoutes(router, cfg.ToMiddlewareSecurityConfig(), handlerManager)
 
@@ -99,77 +155,4 @@ func main() {
 	}
 
 	logger.Info("Zeus NWC Server stopped")
-}
-
-func startNotificationProcessor(ctx context.Context, serviceManager *services.ServiceManager) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			processQueuedNotifications(ctx, serviceManager)
-		}
-	}
-}
-
-func processQueuedNotifications(ctx context.Context, serviceManager *services.ServiceManager) {
-	redisClient := redis.GetClient()
-	keys, err := redisClient.Keys(ctx, "notification_queue:*").Result()
-	if err != nil {
-		logger.WithError(err).Error("Failed to get notification queue keys")
-		return
-	}
-
-	for _, key := range keys {
-		servicePubkey := key[len("notification_queue:"):]
-
-		notifications, err := serviceManager.GetNostrService().GetQueuedNotifications(ctx, servicePubkey)
-		if err != nil {
-			logger.WithError(err).Error("Failed to get queued notifications", "service_pubkey", servicePubkey)
-			continue
-		}
-
-		for _, notificationData := range notifications {
-			deviceToken, ok := notificationData["device_token"].(string)
-			if !ok {
-				logger.WithError(err).Error("Invalid device token in notification", "service_pubkey", servicePubkey)
-				continue
-			}
-
-			title, _ := notificationData["title"].(string)
-			body, _ := notificationData["body"].(string)
-
-			notification := &services.Notification{
-				Title:    title,
-				Body:     body,
-				Badge:    1,
-				Sound:    "default",
-				Category: "NWC_EVENT",
-				Data: map[string]string{
-					"event_id":   fmt.Sprintf("%v", notificationData["event_id"]),
-					"event_kind": fmt.Sprintf("%v", notificationData["event_kind"]),
-					"pubkey":     fmt.Sprintf("%v", notificationData["pubkey"]),
-					"timestamp":  fmt.Sprintf("%v", notificationData["timestamp"]),
-				},
-				ThreadID: "zeus-nwc",
-				Priority: 10,
-			}
-
-			if err := serviceManager.GetNotificationService().SendNotification(ctx, deviceToken, notification); err != nil {
-				logger.WithError(err).Error("Failed to send notification", "service_pubkey", servicePubkey)
-			} else {
-				logger.WithFields(map[string]interface{}{
-					"service_pubkey": servicePubkey,
-					"title":          title,
-				}).Info("Notification sent successfully")
-			}
-		}
-
-		if err := serviceManager.GetNostrService().ClearNotificationQueue(ctx, servicePubkey); err != nil {
-			logger.WithError(err).Error("Failed to clear notification queue", "service_pubkey", servicePubkey)
-		}
-	}
 }

@@ -5,7 +5,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/zeusln/ios-nwc-server/internal/services"
-	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
 type HandoffHandler struct {
@@ -19,55 +18,24 @@ func NewHandoffHandler(handoffService *services.HandoffService) *HandoffHandler 
 }
 
 func (h *HandoffHandler) HandleHandoff(c *gin.Context) {
-	var req services.HandoffRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.WithError(err).Error("Invalid handoff request")
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "Invalid request",
-			"details": err.Error(),
-		})
+	var req services.Handoff
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-
-	response, err := h.handoffService.ProcessHandoff(c.Request.Context(), &req)
-	if err != nil {
-		logger.WithError(err).Error("Failed to process handoff")
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to process handoff request",
-		})
+	if err := h.handoffService.HandleHandoff(c.Request.Context(), &req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	logger.WithFields(map[string]interface{}{
-		"service_pubkey":    req.ServicePubkey,
-		"connections_count": len(req.Connections),
-	}).Info("Handoff processed successfully")
-
-	c.JSON(http.StatusOK, response)
+	c.JSON(http.StatusOK, gin.H{"message": "handoff processed"})
 }
 
-func (h *HandoffHandler) HandleDisconnect(c *gin.Context) {
-	userID := c.Param("user_id")
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "User ID is required",
-		})
-		return
-	}
-
-	err := h.handoffService.DisconnectDevice(c.Request.Context(), userID)
+func (h *HandoffHandler) HandleRestore(c *gin.Context) {
+	deviceToken := c.Query("device_token")
+	handoff, events, err := h.handoffService.HandleRestore(c.Request.Context(), deviceToken)
 	if err != nil {
-		logger.WithError(err).Error("Failed to disconnect device")
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to disconnect device",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	logger.WithField("user_id", userID).Info("Device disconnected successfully")
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Device disconnected successfully",
-		"user_id": userID,
-	})
+	c.JSON(http.StatusOK, gin.H{"connections": handoff.Connections, "events": events})
 }
