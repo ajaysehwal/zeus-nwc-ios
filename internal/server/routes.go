@@ -30,9 +30,8 @@ func SetupRoutes(router *gin.Engine, securityConfig *middleware.SecurityConfig, 
 		handoffService := handlerManager.GetHandoffService()
 		handoffHandler := handler.NewHandoffHandler(handoffService)
 
-		handoff := api.Group("/handoff")
-		{
-			handoff.POST("/", handoffHandler.HandleHandoff)
-		}
+	    api.POST("/handoff", handoffHandler.HandleHandoff)
+		api.GET("/restore", handoffHandler.HandleRestore)
+
 	}
 }

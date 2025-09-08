@@ -1,6 +1,8 @@
 package services
 
 import (
+	"context"
+
 	"github.com/zeusln/ios-nwc-server/internal/config"
 	"github.com/zeusln/ios-nwc-server/pkg/redis"
 )
@@ -14,11 +16,10 @@ type ServiceManager struct {
 
 func NewServiceManager(cfg *config.Config) *ServiceManager {
 	redisClient := redis.GetClient()
-
-	nostrService := NewNostrService(redisClient)
+	notificationService := NewNotificationService(cfg)
+	nostrService := NewNostrService(redisClient,notificationService)
 	handoffService := NewHandoffService(nostrService)
-	notificationService := NewNotificationService(&cfg.Notifications.APNS, redisClient)
-
+	nostrService.RestoreAllDevices(context.Background())
 	return &ServiceManager{
 		Config:              cfg,
 		NostrService:        nostrService,

@@ -229,7 +229,7 @@ func (r *RedisOps) IncrBy(ctx context.Context, key string, increment int64) (int
 
 	value, err := r.client.IncrBy(ctx, key, increment).Result()
 	if err != nil {
-		logger.WithFields(map[string]interface{}{
+		logger.WithFields(map[string]any{
 			"key":       key,
 			"increment": increment,
 			"error":     err,
