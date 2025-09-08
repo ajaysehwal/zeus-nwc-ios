@@ -26,11 +26,13 @@ type NostrService struct {
 	redis     *redis.Client
 	relayPool sync.Map
 	listeners sync.Map
+	notificationService *NotificationService
 }
 
-func NewNostrService(redisClient *redis.Client) *NostrService {
+func NewNostrService(redisClient *redis.Client, notificationService *NotificationService) *NostrService {
 	return &NostrService{
 		redis: redisClient,
+		notificationService: notificationService,
 	}
 }
 
@@ -54,6 +56,49 @@ func (s *NostrService) ProcessHandoff(ctx context.Context, req *Handoff) error {
 	return nil
 }
 
+func (s *NostrService) RestoreAllDevices(ctx context.Context) error {
+	const pattern = "nwc:connections:*"
+	var cursor uint64
+	for {
+		keys, nextCursor, err := s.redis.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return fmt.Errorf("failed to scan Redis keys: %w", err)
+		}
+
+		for _, key := range keys {
+			data, err := s.redis.Get(ctx, key).Bytes()
+			if err == redis.Nil {
+				logger.WithField("key", key).Warn("Connections not found")
+				continue
+			} else if err != nil {
+				logger.WithFields(map[string]interface{}{"key": key, "error": err}).Error("Failed to fetch connections")
+				continue
+			}
+
+			var connections []Connection
+			if err := json.Unmarshal(data, &connections); err != nil {
+				logger.WithFields(map[string]interface{}{"key": key, "error": err}).Error("Failed to parse connections")
+				continue
+			}
+            if (len(connections) == 0) {
+				logger.Debug(fmt.Sprintf("no connections found for device %s , skipping start listener", key))
+				continue
+            }
+			logger.WithField("connections", connections).Info(fmt.Sprintf("Found %d connections", len(connections)))
+			deviceToken := key[len("nwc:connections:"):]
+			handoff := Handoff{DeviceToken: deviceToken, Connections: connections}
+			s.startListener(handoff)
+			logger.WithField("device_token", deviceToken).Info("Restored device connections")
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
+}
+
 func (s *NostrService) HandleRestore(ctx context.Context, deviceToken string) (Handoff, []string, error) {
 	if deviceToken == "" {
 		return Handoff{}, nil, fmt.Errorf("device_token required")
@@ -65,7 +110,6 @@ func (s *NostrService) HandleRestore(ctx context.Context, deviceToken string) (H
 	if cancel, ok := s.listeners.LoadAndDelete(deviceToken); ok {
 		cancel.(context.CancelFunc)()
 	}
-
 	data, err := s.redis.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		return Handoff{}, nil, fmt.Errorf("no connections found")
@@ -142,6 +186,7 @@ func (s *NostrService) listenAuthor(ctx context.Context, deviceToken string, rel
                     continue
                 }
                 logger.WithField("relay_url", relayURL).WithField("author", pubkey).Info("event received")
+				s.handleEvent(ctx, deviceToken, ev)
                 s.cacheEvent(deviceToken, ev)
             }
         }
@@ -149,6 +194,19 @@ func (s *NostrService) listenAuthor(ctx context.Context, deviceToken string, rel
     RETRY:
         continue
     }
+}
+
+
+func (s *NostrService) handleEvent(ctx context.Context, deviceToken string, ev *nostr.Event) {
+	switch ev.Kind {
+	case nostr.KindNWCWalletRequest:
+	   if err := s.notificationService.SendNotification(ctx, deviceToken); err != nil {
+			logger.WithFields(map[string]interface{}{
+				"device_token": deviceToken,
+				"error":        err,
+			}).Error("Failed to send notification")
+		}
+	}
 }
 
 
@@ -175,4 +233,17 @@ func (s *NostrService) cacheEvent(deviceToken string, ev *nostr.Event) {
 		s.redis.LPush(context.Background(), eventKey, data)
 		s.redis.Expire(context.Background(), eventKey, 7*24*time.Hour)
 	}
+}
+
+func (s *NostrService) Shutdown() {
+	s.listeners.Range(func(key, value interface{}) bool {
+		value.(context.CancelFunc)()
+		s.listeners.Delete(key)
+		return true
+	})
+	s.relayPool.Range(func(key, value interface{}) bool {
+		value.(*nostr.Relay).Close()
+		s.relayPool.Delete(key)
+		return true
+	})
 }
