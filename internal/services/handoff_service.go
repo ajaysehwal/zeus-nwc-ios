@@ -4,20 +4,20 @@ import (
 	"context"
 )
 
-type HandoffService struct {
+type EventsService struct {
 	nostrService *NostrService
 }
 
-func NewHandoffService(nostrService *NostrService) *HandoffService {
-	return &HandoffService{
+func NewEventsService(nostrService *NostrService) *EventsService {
+	return &EventsService{
 		nostrService: nostrService,
 	}
 }
 
-func (s *HandoffService) HandleHandoff(ctx context.Context, req *Handoff) error {
+func (s *EventsService) HandleHandoff(ctx context.Context, req *Handoff) error {
 	return s.nostrService.ProcessHandoff(ctx, req)
 }
 
-func (s *HandoffService) HandleRestore(ctx context.Context, deviceToken string) (Handoff, []string, error) {
+func (s *EventsService) HandleRestore(ctx context.Context, deviceToken string) (Handoff, []string, error) {
 	return s.nostrService.HandleRestore(ctx, deviceToken)
 }

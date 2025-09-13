@@ -4,8 +4,6 @@ import (
 	"os"
 	"strconv"
 	"time"
-
-	"github.com/zeusln/ios-nwc-server/internal/middleware"
 )
 
 type Config struct {
@@ -123,18 +121,22 @@ func loadRedisConfig(env string) RedisConfig {
 }
 
 func loadSecurityConfig(env string) SecurityConfig {
-	allowedOrigins := getStringSliceEnv("ALLOWED_ORIGINS", []string{"*"})
-	allowedMethods := getStringSliceEnv("ALLOWED_METHODS", []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"})
-	allowedHeaders := getStringSliceEnv("ALLOWED_HEADERS", []string{"Origin", "Content-Type", "Accept", "Authorization"})
-	maxRequestsPerIP := getIntEnv("MAX_REQUESTS_PER_IP", 100)
-	burstLimit := getIntEnv("BURST_LIMIT", 20)
+	allowedMethods := getStringSliceEnv("ALLOWED_METHODS", []string{"GET", "POST"})
+	maxRequestsPerIP := getIntEnv("MAX_REQUESTS_PER_IP", 1000)
+	burstLimit := getIntEnv("BURST_LIMIT", 100)
 	blockedIPs := getStringSliceEnv("BLOCKED_IPS", []string{})
-	trustedProxies := getStringSliceEnv("TRUSTED_PROXIES", []string{"127.0.0.1", "::1"})
+	trustedProxies := getStringSliceEnv("TRUSTED_PROXIES", []string{"127.0.0.1", "::1", "192.168.0.0/16", "10.0.0.0/8"})
+
+	var allowedOrigins, allowedHeaders []string
 
 	if env == "production" {
+		allowedOrigins = getStringSliceEnv("ALLOWED_ORIGINS", []string{"https://yourdomain.com"})
+		allowedHeaders = getStringSliceEnv("ALLOWED_HEADERS", []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"})
 		maxRequestsPerIP = 200
 		burstLimit = 50
-		allowedOrigins = []string{"https://yourdomain.com"}
+	} else {
+		allowedOrigins = []string{"*"}
+		allowedHeaders = []string{"*"}
 	}
 
 	return SecurityConfig{
@@ -146,8 +148,8 @@ func loadSecurityConfig(env string) SecurityConfig {
 		BlockedIPs:       blockedIPs,
 		TrustedProxies:   trustedProxies,
 		EnableCORS:       getBoolEnv("ENABLE_CORS", true),
-		EnableRateLimit:  getBoolEnv("ENABLE_RATE_LIMIT", true),
-		EnableIPFilter:   getBoolEnv("ENABLE_IP_FILTER", true),
+		EnableRateLimit:  getBoolEnv("ENABLE_RATE_LIMIT", env == "production"),
+		EnableIPFilter:   getBoolEnv("ENABLE_IP_FILTER", env == "production"),
 	}
 }
 
@@ -168,19 +170,8 @@ func loadLogConfig(env string) LogConfig {
 	}
 }
 
-func (c *Config) ToMiddlewareSecurityConfig() *middleware.SecurityConfig {
-	return &middleware.SecurityConfig{
-		AllowedOrigins:   c.Security.AllowedOrigins,
-		AllowedMethods:   c.Security.AllowedMethods,
-		AllowedHeaders:   c.Security.AllowedHeaders,
-		MaxRequestsPerIP: c.Security.MaxRequestsPerIP,
-		BurstLimit:       c.Security.BurstLimit,
-		BlockedIPs:       c.Security.BlockedIPs,
-		TrustedProxies:   c.Security.TrustedProxies,
-		EnableCORS:       c.Security.EnableCORS,
-		EnableRateLimit:  c.Security.EnableRateLimit,
-		EnableIPFilter:   c.Security.EnableIPFilter,
-	}
+func (c *Config) ToMiddlewareSecurityConfig() *SecurityConfig {
+	return &c.Security
 }
 
 func getEnv(key, defaultValue string) string {
