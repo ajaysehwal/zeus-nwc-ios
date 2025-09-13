@@ -11,38 +11,34 @@ import (
 	"github.com/zeusln/ios-nwc-server/pkg/logger"
 )
 
+const (
+	successStatusCode  = 200
+	tokenPreviewLength = 8
+)
+
 type NotificationService struct {
 	client *apns2.Client
 	config *config.APNSConfig
 }
 
-func NewNotificationService(config *config.Config) *NotificationService {
-	service := &NotificationService{config: &config.Notifications.APNS}
-	if config.Notifications.APNS.KeyPath == "" || config.Notifications.APNS.KeyID == "" || config.Notifications.APNS.TeamID == "" || config.Notifications.APNS.BundleID == "" {
+func NewNotificationService(cfg *config.Config) *NotificationService {
+	service := &NotificationService{
+		config: &cfg.Notifications.APNS,
+	}
+
+	if !service.isConfigurationValid() {
 		logger.Warn("APNS configuration incomplete, notifications disabled")
 		return service
 	}
 
-	service.client = service.initAPNSClient()
-	return service
-}
-
-func (s *NotificationService) initAPNSClient() *apns2.Client {
-	authKey, err := token.AuthKeyFromFile(s.config.KeyPath)
+	client, err := service.initializeAPNSClient()
 	if err != nil {
-		logger.WithError(err).Error("Failed to load APNS auth key")
-		return nil
-	}
-	authToken := &token.Token{
-		AuthKey: authKey,
-		KeyID:   s.config.KeyID,
-		TeamID:  s.config.TeamID,
+		logger.WithError(err).Error("Failed to initialize APNS client")
+		return service
 	}
 
-	if s.config.Production {
-		return apns2.NewTokenClient(authToken).Production()
-	}
-	return apns2.NewTokenClient(authToken).Development()
+	service.client = client
+	return service
 }
 
 func (s *NotificationService) SendNotification(ctx context.Context, deviceToken string) error {
@@ -50,25 +46,80 @@ func (s *NotificationService) SendNotification(ctx context.Context, deviceToken 
 		logger.Debug("Notifications disabled, skipping send")
 		return nil
 	}
-	notification := &apns2.Notification{
+
+	if err := s.validateDeviceToken(deviceToken); err != nil {
+		return fmt.Errorf("invalid device token: %w", err)
+	}
+
+	notification := s.buildNotification(deviceToken)
+	response, err := s.client.Push(notification)
+	if err != nil {
+		return fmt.Errorf("failed to send notification: %w", err)
+	}
+
+	if err := s.validateResponse(response); err != nil {
+		return err
+	}
+
+	s.logSuccessfulNotification(deviceToken, response)
+	return nil
+}
+
+func (s *NotificationService) isConfigurationValid() bool {
+	apnsConfig := s.config
+	return apnsConfig.KeyPath != "" &&
+		apnsConfig.KeyID != "" &&
+		apnsConfig.TeamID != "" &&
+		apnsConfig.BundleID != ""
+}
+
+func (s *NotificationService) initializeAPNSClient() (*apns2.Client, error) {
+	authKey, err := token.AuthKeyFromFile(s.config.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load APNS auth key: %w", err)
+	}
+
+	authToken := &token.Token{
+		AuthKey: authKey,
+		KeyID:   s.config.KeyID,
+		TeamID:  s.config.TeamID,
+	}
+
+	client := apns2.NewTokenClient(authToken)
+	if s.config.Production {
+		return client.Production(), nil
+	}
+	return client.Development(), nil
+}
+
+func (s *NotificationService) buildNotification(deviceToken string) *apns2.Notification {
+	return &apns2.Notification{
 		DeviceToken: deviceToken,
 		Topic:       s.config.BundleID,
 		Payload:     payload.NewPayload().ContentAvailable(),
 		Priority:    apns2.PriorityHigh,
 	}
-	response, err := s.client.Push(notification)
-	if err != nil {
-		return fmt.Errorf("failed to send notification: %w", err)
+}
+
+func (s *NotificationService) validateDeviceToken(deviceToken string) error {
+	if deviceToken == "" {
+		return fmt.Errorf("device token cannot be empty")
 	}
-	if response.StatusCode != 200 {
+	return nil
+}
+
+func (s *NotificationService) validateResponse(response *apns2.Response) error {
+	if response.StatusCode != successStatusCode {
 		return fmt.Errorf("APNS error: %s (status: %d)", response.Reason, response.StatusCode)
 	}
+	return nil
+}
 
+func (s *NotificationService) logSuccessfulNotification(deviceToken string, response *apns2.Response) {
 	logger.WithFields(map[string]interface{}{
 		"device_token": s.maskToken(deviceToken),
 		"apns_id":      response.ApnsID,
-	}).Info("Notification sent")
-	return nil
+	}).Info("Notification sent successfully")
 }
 
 func (s *NotificationService) isEnabled() bool {
@@ -76,9 +127,8 @@ func (s *NotificationService) isEnabled() bool {
 }
 
 func (s *NotificationService) maskToken(token string) string {
-	const previewLength = 8
-	if len(token) <= previewLength {
+	if len(token) <= tokenPreviewLength {
 		return token
 	}
-	return token[:previewLength] + "..."
+	return token[:tokenPreviewLength] + "..."
 }

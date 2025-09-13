@@ -26,8 +26,8 @@ func NewServer(cfg *config.Config) *Server {
 	}
 }
 
-func (s *Server) SetupRoutes(securityConfig *middleware.SecurityConfig, handlerManager *handler.HandlerManager) {
-	SetupRoutes(s.router, securityConfig, handlerManager)
+func (s *Server) SetupRoutes(securityManager *middleware.SecurityManager, handlerManager *handler.HandlerManager) {
+	SetupRoutes(s.router, securityManager, handlerManager)
 }
 
 func (s *Server) Start(addr string) error {

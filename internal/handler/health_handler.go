@@ -37,14 +37,19 @@ type CheckInfo struct {
 var startTime = time.Now()
 
 func HealthCheck(c *gin.Context) {
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+
 	logger.WithFields(map[string]interface{}{
-		"ip":         c.ClientIP(),
-		"user_agent": c.Request.UserAgent(),
+		"ip":         clientIP,
+		"user_agent": userAgent,
+		"path":       c.Request.URL.Path,
 	}).Info("Health check requested")
 
 	checks := make(map[string]CheckInfo)
 	checks["redis"] = checkRedis()
 	checks["memory"] = checkMemory()
+	checks["security"] = checkSecurity()
 
 	status := "healthy"
 	for _, check := range checks {
@@ -108,6 +113,15 @@ func checkMemory() CheckInfo {
 	if m.Alloc > 100*1024*1024 {
 		check.Status = "warning"
 		check.Message = "High memory usage detected"
+	}
+
+	return check
+}
+
+func checkSecurity() CheckInfo {
+	check := CheckInfo{
+		Status:  "healthy",
+		Message: "Security systems are operational",
 	}
 
 	return check

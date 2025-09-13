@@ -5,15 +5,14 @@ import (
 )
 
 type HandlerManager struct {
-	handoffService *services.HandoffService
+	handoffService *services.EventsService
 }
 
 func NewHandlerManager(serviceManager *services.ServiceManager) *HandlerManager {
 	return &HandlerManager{
-		handoffService: serviceManager.GetHandoffService(),
+		handoffService: serviceManager.GetEventsService(),
 	}
 }
-
-func (hm *HandlerManager) GetHandoffService() *services.HandoffService {
+func (hm *HandlerManager) GetHandoffService() *services.EventsService {
 	return hm.handoffService
 }

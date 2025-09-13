@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zeusln/ios-nwc-server/internal/config"
 	"github.com/zeusln/ios-nwc-server/internal/handler"
+	"github.com/zeusln/ios-nwc-server/internal/middleware"
 	"github.com/zeusln/ios-nwc-server/internal/server"
 	"github.com/zeusln/ios-nwc-server/internal/services"
 	"github.com/zeusln/ios-nwc-server/pkg/logger"
@@ -35,7 +36,7 @@ func main() {
 		panic(err)
 	}
 
-	logger.Info("Zeus NWC Server")
+	logger.Info("Starting Zeus NWC Server for IOS devices")
 
 	if err := redis.Init(cfg); err != nil {
 		logger.WithError(err).Error("Failed to initialize Redis")
@@ -45,10 +46,32 @@ func main() {
 
 	serviceManager := services.NewServiceManager(cfg)
 	logger.Info("Services initialized successfully")
+
+	securityConfig := middleware.DefaultSecurityConfig()
+
+	if cfg.Log.Environment == "production" {
+		securityConfig.AllowedOrigins = cfg.Security.AllowedOrigins
+		securityConfig.AllowedMethods = cfg.Security.AllowedMethods
+		securityConfig.AllowedHeaders = cfg.Security.AllowedHeaders
+		securityConfig.MaxRequestsPerIP = cfg.Security.MaxRequestsPerIP
+		securityConfig.BurstLimit = cfg.Security.BurstLimit
+		securityConfig.BlockedIPs = cfg.Security.BlockedIPs
+		securityConfig.TrustedProxies = cfg.Security.TrustedProxies
+		securityConfig.EnableCORS = cfg.Security.EnableCORS
+		securityConfig.EnableRateLimit = cfg.Security.EnableRateLimit
+		securityConfig.EnableIPFilter = cfg.Security.EnableIPFilter
+		securityConfig.EnableCSRF = true
+		securityConfig.EnableHoneypot = true
+		securityConfig.EnableSecurityLog = true
+	}
+
+	securityManager := middleware.NewSecurityManager(securityConfig)
+	logger.Info("Security manager initialized successfully")
+
 	router := gin.New()
 	router.Use(gin.Recovery())
 	handlerManager := handler.NewHandlerManager(serviceManager)
-	server.SetupRoutes(router, cfg.ToMiddlewareSecurityConfig(), handlerManager)
+	server.SetupRoutes(router, securityManager, handlerManager)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Server.Port,
